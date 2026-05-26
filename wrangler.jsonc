@@ -11,37 +11,33 @@
 	"migrations": [
 		{
 			"tag": "v1",
-			"new_sqlite_classes": [
-				"MetricExporter",
-				"MetricCoordinator",
-				"AccountMetricCoordinator"
-			]
-		}
+			"new_sqlite_classes": ["MetricExporter", "MetricCoordinator", "AccountMetricCoordinator"],
+		},
 	],
 	"durable_objects": {
 		"bindings": [
 			{
 				"name": "MetricCoordinator",
-				"class_name": "MetricCoordinator"
+				"class_name": "MetricCoordinator",
 			},
 			{
 				"name": "AccountMetricCoordinator",
-				"class_name": "AccountMetricCoordinator"
+				"class_name": "AccountMetricCoordinator",
 			},
 			{
 				"name": "MetricExporter",
-				"class_name": "MetricExporter"
-			}
-		]
+				"class_name": "MetricExporter",
+			},
+		],
 	},
 	"observability": {
-		"enabled": true
+		"enabled": true,
 	},
 	"kv_namespaces": [
 		{
 			"binding": "CONFIG_KV",
-			"id": ""
-		}
+			"id": "",
+		},
 	],
 	"ratelimits": [
 		{
@@ -49,9 +45,9 @@
 			"namespace_id": "1",
 			"simple": {
 				"limit": 200,
-				"period": 10
-			}
-		}
+				"period": 10,
+			},
+		},
 	],
 	"vars": {
 		"QUERY_LIMIT": 10000,
@@ -60,6 +56,8 @@
 		"METRIC_REFRESH_INTERVAL_SECONDS": 60,
 		"LOG_FORMAT": "json",
 		"LOG_LEVEL": "info",
+		// Number of cycles before a stale metric is no longer tracked
+		"COUNTER_EXPIRATION_CYCLES": 5,
 		"ACCOUNT_LIST_CACHE_TTL_SECONDS": 600,
 		"ZONE_LIST_CACHE_TTL_SECONDS": 1800,
 		"SSL_CERTS_CACHE_TTL_SECONDS": 1800,
@@ -69,6 +67,6 @@
 		"CF_HTTP_STATUS_GROUP": false,
 		"METRICS_PATH": "/metrics",
 		"DISABLE_UI": false,
-		"DISABLE_CONFIG_API": false
-	}
+		"DISABLE_CONFIG_API": false,
+	},
 }

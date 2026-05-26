@@ -18,8 +18,7 @@ export type ScopeType = z.infer<typeof ScopeTypeSchema>;
 /**
  * String literal type for MetricExporter DO IDs: "scope:id:queryName".
  */
-export type MetricExporterIdString =
-	`${"account" | "zone"}:${string}:${string}`;
+export type MetricExporterIdString = `${"account" | "zone"}:${string}:${string}`;
 
 /**
  * Zod schema that parses and validates MetricExporter DO ID strings.
@@ -49,6 +48,8 @@ export type MetricExporterId = z.infer<typeof MetricExporterIdSchema>;
 export const CounterStateSchema = z
 	.object({
 		accumulated: z.number(),
+		// Number of remaining windows until a counter is expired
+		expiration: z.number(),
 	})
 	.readonly();
 
