@@ -332,7 +332,10 @@ export class MetricExporter extends DurableObject<Env> {
 				metrics = await this.fetchZoneScopedMetrics(client, state);
 			}
 
+			const previousCounterCount = Object.keys(state.counters).length;
 			const processed = this.processCounters(metrics, state.counters);
+			const newCounterCount = Object.keys(processed.counters).length;
+			const prunedCount = previousCounterCount - newCounterCount;
 
 			this.state = {
 				...state,
@@ -347,6 +350,8 @@ export class MetricExporter extends DurableObject<Env> {
 
 			logger.info("Refresh complete", {
 				metric_count: metrics.length,
+				counter_keys: newCounterCount,
+				counters_pruned: prunedCount > 0 ? prunedCount : undefined,
 			});
 		} catch (error) {
 			const msg = error instanceof Error ? error.message : String(error);
@@ -559,6 +564,7 @@ export class MetricExporter extends DurableObject<Env> {
 
 	/**
 	 * Process raw metrics and accumulate counter values.
+	 * Prunes stale counters that no longer appear in current metrics to prevent unbounded growth.
 	 *
 	 * @param rawMetrics Raw metrics from Cloudflare API.
 	 * @param existingCounters Existing counter state.
@@ -568,7 +574,24 @@ export class MetricExporter extends DurableObject<Env> {
 		rawMetrics: MetricDefinition[],
 		existingCounters: Record<string, CounterState>,
 	): { metrics: MetricDefinition[]; counters: Record<string, CounterState> } {
-		const newCounters: Record<string, CounterState> = { ...existingCounters };
+		// Build set of active counter keys from current metrics
+		const activeKeys = new Set<string>();
+		for (const metric of rawMetrics) {
+			if (metric.type === "counter") {
+				for (const value of metric.values) {
+					activeKeys.add(metricKey(metric.name, value.labels));
+				}
+			}
+		}
+
+		// Start with only counters that are still active (prune stale entries)
+		const newCounters: Record<string, CounterState> = {};
+		for (const key of activeKeys) {
+			const existing = existingCounters[key];
+			if (existing !== undefined) {
+				newCounters[key] = existing;
+			}
+		}
 
 		const metrics = rawMetrics.map((metric) => {
 			if (metric.type !== "counter") {
