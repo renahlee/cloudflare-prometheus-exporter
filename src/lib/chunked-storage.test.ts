@@ -201,4 +201,50 @@ describe("chunked storage", () => {
 		});
 		expect(storage.values.size).toBe(1);
 	});
+
+	it("compresses multi-chunk state with gzip", async () => {
+		const storage = new SizeLimitedMemoryStorage(110_000);
+		// Use varied content to produce realistic (not 1000:1) compression
+		const payload = Array.from({ length: 5000 }, (_, i) => ({
+			key: `metric_${i}`,
+			labels: { zone: `zone-${i % 10}.example.com`, colo: `colo-${i % 300}` },
+			value: Math.random() * 1000,
+		}));
+		const state = { metrics: payload };
+
+		await saveChunkedValue(storage, "state", state);
+		const restored = await loadChunkedValue(storage, "state", z.unknown());
+
+		expect(restored).toEqual(state);
+		// Verify manifest indicates gzip format
+		const manifest = storage.values.get("state:manifest");
+		expect(manifest).toBeDefined();
+		expect(manifest).toMatchObject({ format: "chunked-gzip-v1" });
+	});
+
+	it("reads old chunked-json-v1 state written before compression was added", async () => {
+		const storage = new SizeLimitedMemoryStorage(110_000);
+		// Manually construct a chunked-json-v1 manifest and raw UTF-8 chunks
+		const state = { counters: { requests: 42 }, metrics: ["a".repeat(200_000)] };
+		const json = JSON.stringify(state);
+		const encoded = new TextEncoder().encode(json);
+		const chunkSize = 100 * 1024;
+		const chunkCount = Math.ceil(encoded.byteLength / chunkSize);
+
+		// Write raw (uncompressed) chunks with v1 manifest
+		const manifest = {
+			format: "chunked-json-v1",
+			generation: 0,
+			chunks: chunkCount,
+			bytes: encoded.byteLength,
+		};
+		await storage.putMany({ "state:manifest": manifest });
+		for (let i = 0; i < chunkCount; i++) {
+			const chunk = encoded.slice(i * chunkSize, (i + 1) * chunkSize);
+			await storage.putMany({ [`state:chunk:0:${i}`]: chunk });
+		}
+
+		const restored = await loadChunkedValue(storage, "state", z.unknown());
+		expect(restored).toEqual(state);
+	});
 });

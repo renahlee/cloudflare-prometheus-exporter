@@ -164,6 +164,7 @@ export type CloudflareMetricsClientConfig = Readonly<{
 	queryLimit: number;
 	scrapeDelaySeconds: number;
 	timeWindowSeconds: number;
+	coloMetricsCardinalityLimit: number;
 	loggerConfig?: LoggerConfig;
 	fetch?: typeof globalThis.fetch;
 }>;
@@ -2224,6 +2225,48 @@ export class CloudflareMetricsClient {
 			throw graphQLQueryError("colo-metrics", result.error);
 		}
 
+		// Collect all groups with a significance score for cardinality capping.
+		// Groups are scored by request count so that high-traffic colo/host
+		// combinations are retained when the account exceeds the cap.
+		type ScoredGroup = {
+			zoneName: string;
+			dim: { coloCode?: string | null; clientRequestHTTPHost?: string | null };
+			count: number;
+			visits: number;
+			edgeResponseBytes: number;
+		};
+		const scoredGroups: ScoredGroup[] = [];
+
+		for (const zoneData of result.data?.viewer?.zones ?? []) {
+			const zoneName = findZoneName(zoneData.zoneTag, zones);
+
+			for (const group of zoneData.httpRequestsAdaptiveGroups ?? []) {
+				const count = group.count ?? 0;
+				const visits = group.sum?.visits ?? 0;
+				const edgeResponseBytes = group.sum?.edgeResponseBytes ?? 0;
+				if (count === 0 && visits === 0 && edgeResponseBytes === 0) continue;
+
+				scoredGroups.push({
+					zoneName,
+					dim: group.dimensions ?? {},
+					count,
+					visits,
+					edgeResponseBytes,
+				});
+			}
+		}
+
+		// Cap cardinality: keep only the top N groups by request count.
+		const limit = this.config.coloMetricsCardinalityLimit;
+		if (scoredGroups.length > limit) {
+			this.logger.warn("Colo metrics cardinality exceeds limit, truncating", {
+				total_groups: scoredGroups.length,
+				limit,
+			});
+			scoredGroups.sort((a, b) => b.count - a.count);
+			scoredGroups.length = limit;
+		}
+
 		const visits: MetricDefinition = {
 			name: "cloudflare_zone_colocation_visits_total",
 			help: "Visits per colo",
@@ -2243,30 +2286,24 @@ export class CloudflareMetricsClient {
 			values: [],
 		};
 
-		for (const zoneData of result.data?.viewer?.zones ?? []) {
-			const zoneName = findZoneName(zoneData.zoneTag, zones);
+		for (const group of scoredGroups) {
+			const labels = {
+				zone: group.zoneName,
+				colo: group.dim.coloCode ?? "",
+				host: group.dim.clientRequestHTTPHost ?? "",
+			};
 
-			for (const group of zoneData.httpRequestsAdaptiveGroups ?? []) {
-				const dim = group.dimensions;
-				const labels = {
-					zone: zoneName,
-					colo: dim?.coloCode ?? "",
-					host: dim?.clientRequestHTTPHost ?? "",
-				};
-
-				const visitsValue = group.sum?.visits;
-				if (visitsValue != null && visitsValue > 0) {
-					visits.values.push({ labels, value: visitsValue });
-				}
-
-				const bytesValue = group.sum?.edgeResponseBytes;
-				if (bytesValue != null && bytesValue > 0) {
-					responseBytes.values.push({ labels, value: bytesValue });
-				}
-
-				if (group.count != null && group.count > 0) {
-					requestsTotal.values.push({ labels, value: group.count });
-				}
+			if (group.visits > 0) {
+				visits.values.push({ labels, value: group.visits });
+			}
+			if (group.edgeResponseBytes > 0) {
+				responseBytes.values.push({
+					labels,
+					value: group.edgeResponseBytes,
+				});
+			}
+			if (group.count > 0) {
+				requestsTotal.values.push({ labels, value: group.count });
 			}
 		}
 
@@ -3493,6 +3530,7 @@ export function getCloudflareMetricsClient(env: Env): CloudflareMetricsClient {
 		scrapeDelaySeconds: defaults.scrapeDelaySeconds,
 		timeWindowSeconds: defaults.timeWindowSeconds,
 		queryLimit: defaults.queryLimit,
+		coloMetricsCardinalityLimit: defaults.coloMetricsCardinalityLimit,
 		loggerConfig,
 		fetch: rateLimitedFetch,
 	});

@@ -4,10 +4,11 @@ const CHUNK_BYTES = 100 * 1024;
 const MAX_KEYS_PER_OPERATION = 128;
 const MAX_SERIALIZED_BYTES = 16 * 1024 * 1024;
 const MAX_CHUNKS = Math.ceil(MAX_SERIALIZED_BYTES / CHUNK_BYTES);
-const FORMAT = "chunked-json-v1";
+const FORMAT_JSON = "chunked-json-v1";
+const FORMAT_GZIP = "chunked-gzip-v1";
 
 const ChunkManifestSchema = z.object({
-	format: z.literal(FORMAT),
+	format: z.union([z.literal(FORMAT_JSON), z.literal(FORMAT_GZIP)]),
 	generation: z.union([z.literal(0), z.literal(1)]),
 	chunks: z.number().int().positive().max(MAX_CHUNKS),
 	bytes: z.number().int().positive().max(MAX_SERIALIZED_BYTES).optional(),
@@ -45,7 +46,7 @@ function isChunkFormat(value: unknown): boolean {
 		typeof value === "object" &&
 		value !== null &&
 		"format" in value &&
-		value.format === FORMAT
+		(value.format === FORMAT_JSON || value.format === FORMAT_GZIP)
 	);
 }
 
@@ -108,6 +109,22 @@ async function readCurrentValues(
 	return { base, manifest: parseManifest(base) };
 }
 
+/** Compress a Uint8Array using gzip via the Web Streams API. */
+async function gzipCompress(data: Uint8Array): Promise<Uint8Array> {
+	const stream = new Blob([data])
+		.stream()
+		.pipeThrough(new CompressionStream("gzip"));
+	return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+/** Decompress a gzip-compressed Uint8Array via the Web Streams API. */
+async function gzipDecompress(data: Uint8Array): Promise<Uint8Array> {
+	const stream = new Blob([data])
+		.stream()
+		.pipeThrough(new DecompressionStream("gzip"));
+	return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
 /** Loads a chunked value, or state written by an older unchunked exporter. */
 export async function loadChunkedValue<T>(
 	storage: ChunkedValueStorage,
@@ -119,9 +136,8 @@ export async function loadChunkedValue<T>(
 		return current.base === undefined ? undefined : schema.parse(current.base);
 	}
 
-	const decoder = new TextDecoder();
 	const keys = chunkKeys(baseKey, current.manifest);
-	let serialized = "";
+	const chunkArrays: Uint8Array[] = [];
 	let byteLength = 0;
 	for (const keyBatch of batches(keys)) {
 		const values = await storage.getMany(keyBatch);
@@ -136,10 +152,9 @@ export async function loadChunkedValue<T>(
 					"Chunked storage value exceeds the safe size limit",
 				);
 			}
-			serialized += decoder.decode(value, { stream: true });
+			chunkArrays.push(value);
 		}
 	}
-	serialized += decoder.decode();
 	if (
 		current.manifest.bytes !== undefined &&
 		byteLength !== current.manifest.bytes
@@ -147,12 +162,29 @@ export async function loadChunkedValue<T>(
 		throw new Error("Chunked storage value has an invalid byte length");
 	}
 
+	// Reassemble chunks into a single buffer
+	const assembled = new Uint8Array(byteLength);
+	let offset = 0;
+	for (const chunk of chunkArrays) {
+		assembled.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+
+	// Decompress if stored with gzip format, otherwise decode directly
+	const jsonBytes =
+		current.manifest.format === FORMAT_GZIP
+			? await gzipDecompress(assembled)
+			: assembled;
+
+	const serialized = new TextDecoder().decode(jsonBytes);
 	const parsed: unknown = JSON.parse(serialized);
 	return schema.parse(parsed);
 }
 
 /**
  * Persists a value in bounded chunks and atomically switches a manifest pointer.
+ * Values larger than a single chunk are gzip-compressed before chunking to
+ * reduce storage footprint for high-cardinality metric state.
  * The legacy base value is retained while state is large, allowing rollback to an
  * older exporter to load the last small valid snapshot.
  */
@@ -168,12 +200,10 @@ export async function saveChunkedValue(
 	if (json === undefined) {
 		throw new TypeError("Chunked storage value must be JSON serializable");
 	}
-	const serialized = new TextEncoder().encode(json);
-	if (serialized.byteLength > MAX_SERIALIZED_BYTES) {
-		throw new RangeError("Chunked storage value exceeds the safe size limit");
-	}
+	const rawBytes = new TextEncoder().encode(json);
 
-	if (serialized.byteLength <= CHUNK_BYTES) {
+	// Small values are stored directly without chunking or compression
+	if (rawBytes.byteLength <= CHUNK_BYTES) {
 		if (previousManifest === undefined) {
 			await cleanupPendingGeneration(storage, baseKey, 0);
 			await cleanupPendingGeneration(storage, baseKey, 1);
@@ -194,11 +224,17 @@ export async function saveChunkedValue(
 		return;
 	}
 
+	// Compress before chunking to maximize storage headroom
+	const compressed = await gzipCompress(rawBytes);
+	if (compressed.byteLength > MAX_SERIALIZED_BYTES) {
+		throw new RangeError("Chunked storage value exceeds the safe size limit");
+	}
+
 	const nextManifest: ChunkManifest = {
-		format: FORMAT,
+		format: FORMAT_GZIP,
 		generation,
-		chunks: Math.ceil(serialized.byteLength / CHUNK_BYTES),
-		bytes: serialized.byteLength,
+		chunks: Math.ceil(compressed.byteLength / CHUNK_BYTES),
+		bytes: compressed.byteLength,
 	};
 	const nextPendingKey = pendingKey(baseKey, generation);
 	if (previousManifest === undefined) {
@@ -228,7 +264,7 @@ export async function saveChunkedValue(
 			nextManifest.chunks,
 		);
 		for (let index = firstChunk; index < lastChunk; index++) {
-			entries[chunkKey(baseKey, generation, index)] = serialized.slice(
+			entries[chunkKey(baseKey, generation, index)] = compressed.slice(
 				index * CHUNK_BYTES,
 				(index + 1) * CHUNK_BYTES,
 			);

@@ -8,6 +8,7 @@ function createClient(fetch: typeof globalThis.fetch): CloudflareMetricsClient {
 		queryLimit: 100,
 		scrapeDelaySeconds: 300,
 		timeWindowSeconds: 60,
+		coloMetricsCardinalityLimit: 5000,
 		fetch,
 	});
 }

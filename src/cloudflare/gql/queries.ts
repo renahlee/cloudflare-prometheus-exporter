@@ -323,8 +323,6 @@ export const ColoMetricsQuery = graphql(`
           dimensions {
             clientRequestHTTPHost
             coloCode
-            datetime
-            originResponseStatus
           }
           sum {
             edgeResponseBytes

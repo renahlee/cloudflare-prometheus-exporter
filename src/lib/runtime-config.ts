@@ -31,6 +31,8 @@ export const ConfigKeySchema = z.enum([
 	// Hostname metrics
 	"hostMetricsAllowlist",
 	"hostMetricsDelaySeconds",
+	// Cardinality limits
+	"coloMetricsCardinalityLimit",
 ]);
 
 /**
@@ -60,6 +62,7 @@ const ConfigValueSchemas = {
 	httpStatusGroup: z.boolean(),
 	hostMetricsAllowlist: z.string(),
 	hostMetricsDelaySeconds: z.number().int().min(30),
+	coloMetricsCardinalityLimit: z.number().int().positive(),
 } as const;
 
 /**
@@ -91,6 +94,8 @@ export const ConfigOverridesSchema = z
 		hostMetricsAllowlist: ConfigValueSchemas.hostMetricsAllowlist.optional(),
 		hostMetricsDelaySeconds:
 			ConfigValueSchemas.hostMetricsDelaySeconds.optional(),
+		coloMetricsCardinalityLimit:
+			ConfigValueSchemas.coloMetricsCardinalityLimit.optional(),
 	})
 	.readonly();
 
@@ -123,6 +128,8 @@ export const ResolvedConfigSchema = z
 		httpStatusGroup: ConfigValueSchemas.httpStatusGroup,
 		hostMetricsAllowlist: ConfigValueSchemas.hostMetricsAllowlist,
 		hostMetricsDelaySeconds: ConfigValueSchemas.hostMetricsDelaySeconds,
+		coloMetricsCardinalityLimit:
+			ConfigValueSchemas.coloMetricsCardinalityLimit,
 	})
 	.readonly();
 
@@ -141,6 +148,7 @@ type OptionalEnvVars = {
 	CF_FREE_TIER_ACCOUNTS?: string;
 	HEALTH_CHECK_CACHE_TTL_SECONDS?: string;
 	HOST_METRICS_ALLOWLIST?: string;
+	COLO_METRICS_CARDINALITY_LIMIT?: string;
 };
 
 /**
@@ -200,6 +208,10 @@ export function getEnvDefaults(env: Env): ResolvedConfig {
 			.number()
 			.catch(60)
 			.parse(env.HOST_METRICS_DELAY_SECONDS),
+		coloMetricsCardinalityLimit: z.coerce
+			.number()
+			.catch(5000)
+			.parse(optionalEnv.COLO_METRICS_CARDINALITY_LIMIT),
 	};
 }
 
@@ -289,6 +301,9 @@ function mergeConfig(
 			overrides.hostMetricsAllowlist ?? defaults.hostMetricsAllowlist,
 		hostMetricsDelaySeconds:
 			overrides.hostMetricsDelaySeconds ?? defaults.hostMetricsDelaySeconds,
+		coloMetricsCardinalityLimit:
+			overrides.coloMetricsCardinalityLimit ??
+			defaults.coloMetricsCardinalityLimit,
 	};
 }
 
