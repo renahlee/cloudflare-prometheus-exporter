@@ -180,6 +180,55 @@ export type HttpMetricsInput = Readonly<{
 	zoneIds: string[];
 }>;
 
+/**
+ * Intermediate representation used to rank and cap colo-metric groups by
+ * request count before emitting Prometheus metrics.
+ */
+type ScoredColoGroup = {
+	zoneName: string;
+	dim: { coloCode?: string | null; clientRequestHTTPHost?: string | null };
+	count: number;
+	visits: number;
+	edgeResponseBytes: number;
+};
+
+/**
+ * Intermediate representation used to rank and cap colo error-metric groups
+ * by request count before emitting Prometheus metrics.
+ */
+type ScoredColoErrorGroup = {
+	zoneName: string;
+	dim: {
+		coloCode?: string | null;
+		clientRequestHTTPHost?: string | null;
+		edgeResponseStatus?: number | null;
+	};
+	count: number;
+	visits: number;
+	edgeResponseBytes: number;
+};
+
+/**
+ * Sorts scored groups by request count descending with deterministic
+ * tie-breaking on colo code and host to avoid counter resets when groups
+ * at the truncation boundary have identical counts between scrapes.
+ */
+function sortScoredGroups<
+	T extends {
+		count: number;
+		dim: { coloCode?: string | null; clientRequestHTTPHost?: string | null };
+	},
+>(groups: T[]): void {
+	groups.sort(
+		(a, b) =>
+			b.count - a.count ||
+			(a.dim.coloCode ?? "").localeCompare(b.dim.coloCode ?? "") ||
+			(a.dim.clientRequestHTTPHost ?? "").localeCompare(
+				b.dim.clientRequestHTTPHost ?? "",
+			),
+	);
+}
+
 // Workers-compatible batch scheduler
 const batchScheduleFn = (cb: () => void) => queueMicrotask(cb);
 
@@ -2225,17 +2274,10 @@ export class CloudflareMetricsClient {
 			throw graphQLQueryError("colo-metrics", result.error);
 		}
 
-		// Collect all groups with a significance score for cardinality capping.
-		// Groups are scored by request count so that high-traffic colo/host
-		// combinations are retained when the account exceeds the cap.
-		type ScoredGroup = {
-			zoneName: string;
-			dim: { coloCode?: string | null; clientRequestHTTPHost?: string | null };
-			count: number;
-			visits: number;
-			edgeResponseBytes: number;
-		};
-		const scoredGroups: ScoredGroup[] = [];
+		// Collect all groups ranked by request count for cardinality capping so
+		// that high-traffic colo/host combinations are retained when the account
+		// exceeds the cap.
+		const scoredGroups: ScoredColoGroup[] = [];
 
 		for (const zoneData of result.data?.viewer?.zones ?? []) {
 			const zoneName = findZoneName(zoneData.zoneTag, zones);
@@ -2258,12 +2300,13 @@ export class CloudflareMetricsClient {
 
 		// Cap cardinality: keep only the top N groups by request count.
 		const limit = this.config.coloMetricsCardinalityLimit;
+		const totalGroupsBeforeCap = scoredGroups.length;
 		if (scoredGroups.length > limit) {
 			this.logger.warn("Colo metrics cardinality exceeds limit, truncating", {
 				total_groups: scoredGroups.length,
 				limit,
 			});
-			scoredGroups.sort((a, b) => b.count - a.count);
+			sortScoredGroups(scoredGroups);
 			scoredGroups.length = limit;
 		}
 
@@ -2307,9 +2350,25 @@ export class CloudflareMetricsClient {
 			}
 		}
 
-		return [visits, responseBytes, requestsTotal].filter(
+		const metrics = [visits, responseBytes, requestsTotal].filter(
 			(m) => m.values.length > 0,
 		);
+
+		// Expose cardinality pressure as a gauge so Prometheus consumers can
+		// alert when colo-metric groups are being truncated.
+		if (totalGroupsBeforeCap > 0) {
+			metrics.push({
+				name: "cloudflare_zone_colocation_groups_total",
+				help: "Number of colo-metric groups before and after cardinality capping",
+				type: "gauge",
+				values: [
+					{ labels: { state: "total" }, value: totalGroupsBeforeCap },
+					{ labels: { state: "retained" }, value: scoredGroups.length },
+				],
+			});
+		}
+
+		return metrics;
 	}
 
 	/**
@@ -2337,6 +2396,43 @@ export class CloudflareMetricsClient {
 			throw graphQLQueryError("colo-error-metrics", result.error);
 		}
 
+		// Collect all error groups ranked by request count for cardinality capping.
+		const scoredErrorGroups: ScoredColoErrorGroup[] = [];
+
+		for (const zoneData of result.data?.viewer?.zones ?? []) {
+			const zoneName = findZoneName(zoneData.zoneTag, zones);
+
+			for (const group of zoneData.httpRequestsAdaptiveGroups ?? []) {
+				const count = group.count ?? 0;
+				const visits = group.sum?.visits ?? 0;
+				const edgeResponseBytes = group.sum?.edgeResponseBytes ?? 0;
+				if (count === 0 && visits === 0 && edgeResponseBytes === 0) continue;
+
+				scoredErrorGroups.push({
+					zoneName,
+					dim: group.dimensions ?? {},
+					count,
+					visits,
+					edgeResponseBytes,
+				});
+			}
+		}
+
+		// Cap cardinality: keep only the top N groups by request count.
+		const errorLimit = this.config.coloMetricsCardinalityLimit;
+		const totalErrorGroupsBeforeCap = scoredErrorGroups.length;
+		if (scoredErrorGroups.length > errorLimit) {
+			this.logger.warn(
+				"Colo error metrics cardinality exceeds limit, truncating",
+				{
+					total_groups: scoredErrorGroups.length,
+					limit: errorLimit,
+				},
+			);
+			sortScoredGroups(scoredErrorGroups);
+			scoredErrorGroups.length = errorLimit;
+		}
+
 		const visitsError: MetricDefinition = {
 			name: "cloudflare_zone_colocation_error_visits_total",
 			help: "Error visits per colo",
@@ -2356,37 +2452,50 @@ export class CloudflareMetricsClient {
 			values: [],
 		};
 
-		for (const zoneData of result.data?.viewer?.zones ?? []) {
-			const zoneName = findZoneName(zoneData.zoneTag, zones);
+		for (const group of scoredErrorGroups) {
+			const labels = {
+				zone: group.zoneName,
+				colo: group.dim.coloCode ?? "",
+				host: group.dim.clientRequestHTTPHost ?? "",
+				status: String(group.dim.edgeResponseStatus ?? 0),
+			};
 
-			for (const group of zoneData.httpRequestsAdaptiveGroups ?? []) {
-				const dim = group.dimensions;
-				const labels = {
-					zone: zoneName,
-					colo: dim?.coloCode ?? "",
-					host: dim?.clientRequestHTTPHost ?? "",
-					status: String(dim?.edgeResponseStatus ?? 0),
-				};
-
-				const visitsValue = group.sum?.visits;
-				if (visitsValue != null && visitsValue > 0) {
-					visitsError.values.push({ labels, value: visitsValue });
-				}
-
-				const bytesValue = group.sum?.edgeResponseBytes;
-				if (bytesValue != null && bytesValue > 0) {
-					responseBytesError.values.push({ labels, value: bytesValue });
-				}
-
-				if (group.count != null && group.count > 0) {
-					requestsError.values.push({ labels, value: group.count });
-				}
+			if (group.visits > 0) {
+				visitsError.values.push({ labels, value: group.visits });
+			}
+			if (group.edgeResponseBytes > 0) {
+				responseBytesError.values.push({
+					labels,
+					value: group.edgeResponseBytes,
+				});
+			}
+			if (group.count > 0) {
+				requestsError.values.push({ labels, value: group.count });
 			}
 		}
 
-		return [visitsError, responseBytesError, requestsError].filter(
-			(m) => m.values.length > 0,
-		);
+		const errorMetrics = [
+			visitsError,
+			responseBytesError,
+			requestsError,
+		].filter((m) => m.values.length > 0);
+
+		if (totalErrorGroupsBeforeCap > 0) {
+			errorMetrics.push({
+				name: "cloudflare_zone_colocation_error_groups_total",
+				help: "Number of colo error-metric groups before and after cardinality capping",
+				type: "gauge",
+				values: [
+					{ labels: { state: "total" }, value: totalErrorGroupsBeforeCap },
+					{
+						labels: { state: "retained" },
+						value: scoredErrorGroups.length,
+					},
+				],
+			});
+		}
+
+		return errorMetrics;
 	}
 
 	/**

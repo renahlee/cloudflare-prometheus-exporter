@@ -119,10 +119,14 @@ async function gzipCompress(data: Uint8Array): Promise<Uint8Array> {
 
 /** Decompress a gzip-compressed Uint8Array via the Web Streams API. */
 async function gzipDecompress(data: Uint8Array): Promise<Uint8Array> {
-	const stream = new Blob([data])
-		.stream()
-		.pipeThrough(new DecompressionStream("gzip"));
-	return new Uint8Array(await new Response(stream).arrayBuffer());
+	try {
+		const stream = new Blob([data])
+			.stream()
+			.pipeThrough(new DecompressionStream("gzip"));
+		return new Uint8Array(await new Response(stream).arrayBuffer());
+	} catch (cause) {
+		throw new Error("Failed to decompress gzip chunk data", { cause });
+	}
 }
 
 /** Loads a chunked value, or state written by an older unchunked exporter. */
@@ -175,6 +179,11 @@ export async function loadChunkedValue<T>(
 		current.manifest.format === FORMAT_GZIP
 			? await gzipDecompress(assembled)
 			: assembled;
+	if (jsonBytes.byteLength > MAX_SERIALIZED_BYTES) {
+		throw new RangeError(
+			"Decompressed chunked storage value exceeds the safe size limit",
+		);
+	}
 
 	const serialized = new TextDecoder().decode(jsonBytes);
 	const parsed: unknown = JSON.parse(serialized);
@@ -185,8 +194,13 @@ export async function loadChunkedValue<T>(
  * Persists a value in bounded chunks and atomically switches a manifest pointer.
  * Values larger than a single chunk are gzip-compressed before chunking to
  * reduce storage footprint for high-cardinality metric state.
- * The legacy base value is retained while state is large, allowing rollback to an
- * older exporter to load the last small valid snapshot.
+ *
+ * The legacy base value is retained while state is large so that a rollback to
+ * the *previous* exporter version can load the last small valid snapshot.
+ * Note: rolling back past the gzip migration is not supported — an older exporter
+ * that only accepts `chunked-json-v1` will fail to parse the `chunked-gzip-v1`
+ * manifest. In that scenario the `state:manifest` key must be deleted manually
+ * from DO storage to fall back to the legacy base value.
  */
 export async function saveChunkedValue(
 	storage: ChunkedValueStorage,

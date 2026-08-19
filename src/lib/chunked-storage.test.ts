@@ -208,7 +208,7 @@ describe("chunked storage", () => {
 		const payload = Array.from({ length: 5000 }, (_, i) => ({
 			key: `metric_${i}`,
 			labels: { zone: `zone-${i % 10}.example.com`, colo: `colo-${i % 300}` },
-			value: Math.random() * 1000,
+			value: (((i * 2654435761) >>> 0) % 100000) / 100,
 		}));
 		const state = { metrics: payload };
 
@@ -225,7 +225,10 @@ describe("chunked storage", () => {
 	it("reads old chunked-json-v1 state written before compression was added", async () => {
 		const storage = new SizeLimitedMemoryStorage(110_000);
 		// Manually construct a chunked-json-v1 manifest and raw UTF-8 chunks
-		const state = { counters: { requests: 42 }, metrics: ["a".repeat(200_000)] };
+		const state = {
+			counters: { requests: 42 },
+			metrics: ["a".repeat(200_000)],
+		};
 		const json = JSON.stringify(state);
 		const encoded = new TextEncoder().encode(json);
 		const chunkSize = 100 * 1024;
@@ -246,5 +249,45 @@ describe("chunked storage", () => {
 
 		const restored = await loadChunkedValue(storage, "state", z.unknown());
 		expect(restored).toEqual(state);
+	});
+
+	it("migrates chunked-json-v1 state to chunked-gzip-v1 on re-save", async () => {
+		const storage = new SizeLimitedMemoryStorage(110_000);
+		// Seed chunked-json-v1 data manually (simulating pre-gzip exporter)
+		const state = {
+			counters: { requests: 42 },
+			metrics: ["b".repeat(200_000)],
+		};
+		const json = JSON.stringify(state);
+		const encoded = new TextEncoder().encode(json);
+		const chunkSize = 100 * 1024;
+		const chunkCount = Math.ceil(encoded.byteLength / chunkSize);
+
+		const manifest = {
+			format: "chunked-json-v1",
+			generation: 0,
+			chunks: chunkCount,
+			bytes: encoded.byteLength,
+		};
+		await storage.putMany({ "state:manifest": manifest });
+		for (let i = 0; i < chunkCount; i++) {
+			const chunk = encoded.slice(i * chunkSize, (i + 1) * chunkSize);
+			await storage.putMany({ [`state:chunk:0:${i}`]: chunk });
+		}
+
+		// Load v1 data and re-save it (production migration path)
+		const loaded = await loadChunkedValue(storage, "state", z.unknown());
+		expect(loaded).toEqual(state);
+
+		await saveChunkedValue(storage, "state", loaded);
+
+		// Verify manifest upgraded to gzip format
+		const updatedManifest = storage.values.get("state:manifest");
+		expect(updatedManifest).toBeDefined();
+		expect(updatedManifest).toMatchObject({ format: "chunked-gzip-v1" });
+
+		// Verify data is intact after migration
+		const reloaded = await loadChunkedValue(storage, "state", z.unknown());
+		expect(reloaded).toEqual(state);
 	});
 });

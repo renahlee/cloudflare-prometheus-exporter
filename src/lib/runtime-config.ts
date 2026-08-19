@@ -62,7 +62,7 @@ const ConfigValueSchemas = {
 	httpStatusGroup: z.boolean(),
 	hostMetricsAllowlist: z.string(),
 	hostMetricsDelaySeconds: z.number().int().min(30),
-	coloMetricsCardinalityLimit: z.number().int().positive(),
+	coloMetricsCardinalityLimit: z.number().int().positive().max(100_000),
 } as const;
 
 /**
@@ -128,8 +128,7 @@ export const ResolvedConfigSchema = z
 		httpStatusGroup: ConfigValueSchemas.httpStatusGroup,
 		hostMetricsAllowlist: ConfigValueSchemas.hostMetricsAllowlist,
 		hostMetricsDelaySeconds: ConfigValueSchemas.hostMetricsDelaySeconds,
-		coloMetricsCardinalityLimit:
-			ConfigValueSchemas.coloMetricsCardinalityLimit,
+		coloMetricsCardinalityLimit: ConfigValueSchemas.coloMetricsCardinalityLimit,
 	})
 	.readonly();
 
@@ -210,6 +209,8 @@ export function getEnvDefaults(env: Env): ResolvedConfig {
 			.parse(env.HOST_METRICS_DELAY_SECONDS),
 		coloMetricsCardinalityLimit: z.coerce
 			.number()
+			.int()
+			.positive()
 			.catch(5000)
 			.parse(optionalEnv.COLO_METRICS_CARDINALITY_LIMIT),
 	};

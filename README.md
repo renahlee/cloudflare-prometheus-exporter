@@ -64,6 +64,7 @@ Set in `wrangler.jsonc` or via `wrangler secret put`:
 | `CF_FREE_TIER_ACCOUNTS` | - | Comma-separated account IDs using free tier (skips paid-tier metrics) |
 | `HOST_METRICS_ALLOWLIST` | - | Comma-separated hostnames for hostname-level metrics (max 50). Empty disables. Adds 1 extra GraphQL call per account per refresh cycle. `EXCLUDE_HOST=true` also disables. |
 | `HOST_METRICS_DELAY_SECONDS` | 60 | Ingestion delay for hostname metrics (seconds). Lower values = fresher data for alerting but risk incomplete data. Independent from `SCRAPE_DELAY_SECONDS`. |
+| `COLO_METRICS_CARDINALITY_LIMIT` | 5000 | Max colo-metric groups retained per scrape (top-N by request count). Applies to both colo and colo-error metrics. |
 | `METRICS_PATH` | /metrics | Custom path for metrics endpoint |
 | `BASIC_AUTH_USER` | - | Username for basic auth (secret, default: no auth, requires `BASIC_AUTH_PASSWORD`) |
 | `BASIC_AUTH_PASSWORD` | - | Password for basic auth (secret, default: no auth, requires `BASIC_AUTH_USER`) |
