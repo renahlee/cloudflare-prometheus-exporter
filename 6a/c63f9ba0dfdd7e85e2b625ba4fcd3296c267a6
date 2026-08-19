@@ -1,0 +1,23 @@
+src/cloudflare/client.ts
+  s_d30d9d988b5b0f::t_c1517db13b0075 183-231,2277-2280,2303,2309,2353,2356-2371,2399-2435,2455-2461,2463-2475,2477-2481,2483-2495,2498
+src/lib/chunked-storage.test.ts
+  s_d30d9d988b5b0f::t_7910f22e2e6905 211,228-231,253-292
+src/lib/runtime-config.ts
+  s_d30d9d988b5b0f::t_27b5a27144651f 65,131,212-213
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6ac63f9ba0dfdd7e85e2b625ba4fcd3296c267a6",
+  "prompts": {},
+  "sessions": {
+    "s_d30d9d988b5b0f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_fe4e36fb2ffeAi1K74TmgXWjJ2",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "renahlee <12389148+renahlee@users.noreply.github.com>"
+    }
+  }
+}
